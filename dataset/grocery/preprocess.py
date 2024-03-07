@@ -3,9 +3,8 @@ import json
 import pickle
 
 
-# 对于3-hop而言，取category的前两个以及brand作为三条，因为brand在实际生活中对用户的影响是要大于第三类category的
 # 对于不在用户交互数据里的那些物品，不需要读取n_hop数据
-def read_meta_data(n_hop=3):
+def read_meta_data(n_hop=2):
     # item从1开始，0充当padding
     # 为了统一，taxonomy也从1开始(或者taxonomy也需要padding。即taxonomy不足目标数时，利用padding代替)
     taxonomy_cnt = 1
@@ -16,18 +15,28 @@ def read_meta_data(n_hop=3):
 
             # 对于categories而言，需要除去第一大类，因为他们的第一大类都一样
             # 除去第一大类后，种类数大于等于1
-            old_item, categories, brand = item_meta_dict['asin'], item_meta_dict['category'][1:], item_meta_dict[
-                'brand']
+            old_item, categories = item_meta_dict['asin'], item_meta_dict['category'][1:]
 
             if old_item not in item_old2new:
                 continue
             new_item = item_old2new[old_item]
 
-            # len(categories) + len(['0']) + len(brand) == n_hop & len(brand) == 1
-            if len(categories) > n_hop - 2:
-                old_taxonomies = categories[:n_hop - 1] + [brand]
-            else:
-                old_taxonomies = categories + ['0'] * (n_hop - 1 - len(categories)) + [brand]
+            # # len(categories) + len(['0']) + len(brand) == n_hop & len(brand) == 1
+            # if len(categories) > n_hop - 2:
+            #     old_taxonomies = categories[:n_hop - 1] + [brand]
+            # else:
+            #     old_taxonomies = categories + ['0'] * (n_hop - 1 - len(categories)) + [brand]
+
+            # 先把品牌去掉，品牌加入后会出现不能构建成树的问题
+            old_taxonomies = []
+            idx = 0
+            while len(old_taxonomies) < n_hop and idx < len(categories):
+                old_taxonomies.append(categories[idx])
+                idx += 1
+
+            # 不足则补0
+            while len(old_taxonomies) < n_hop:
+                old_taxonomies.append('0')
 
             new_taxonomies = []
             for old_taxonomy in old_taxonomies:
@@ -134,7 +143,7 @@ if __name__ == '__main__':
     item_taxonomy_dict = dict()
 
     # 对于
-    read_meta_data(n_hop=3)
+    read_meta_data(n_hop=2)
     # 这里会报错，问题在于交互数据中的部分物品没有metadata，需要将这一部分物品删除
     # 确保交互数据中的每个物品都有元数据
     assert len(item_taxonomy_dict) == len(item_old2new)
@@ -143,3 +152,6 @@ if __name__ == '__main__':
     # 其余保存后面会用到，用于解释
     with open('item_taxonomy.dict', 'wb') as f:
         pickle.dump(item_taxonomy_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with open('taxonomy2id.json', 'w') as f:
+        json.dump(taxonomy2id, f, indent=4)
