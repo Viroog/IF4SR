@@ -1,26 +1,21 @@
-import pickle
 import dgl
 import torch
 from collections import defaultdict
 from multiprocessing import Process, Queue
 import numpy as np
 
-import pandas as pd
-
 
 # 生成单个用户的意图森林
 # 先别管什么训练集、验证集和测试集，先将整个序列的意图树构建出来
-def generate_user_intent_forest(user, seq):
-    # 森林中每棵树的根节点集合以及叶子节点集合
-    root, leaf = set(), set()
+def generate_user_intent_forest(user, seq, taxonomy_tree):
+    # 森林中每棵树的根节点集合
+    root = set()
 
     items, items_parent = [], []
     t_childs, t_parents = [], []
 
     # 构建成异构图，物品到标签是i2t（item_to_taxonomy），子标签到父标签是t2t（taxonomy_to_taxnomy）
     for item in seq:
-        leaf.add(item)
-
         # [first_category, second_category, ...]
         item_taxonomies = taxonomy_tree[item]
         items.append(item)
@@ -42,37 +37,46 @@ def generate_user_intent_forest(user, seq):
     # 根节点：出度为0，入度不为0        叶子节点：出度不为0，入度为0     其余节点：出度入度均不为0
     forest = dgl.heterograph(forest_data)
 
-    return root, leaf, forest
+    # 无重复的叶子节点集合以及无重复的标签节点集合
+    item_set, taxonomy_set = list(set(items)), list(set(t_childs + t_parents))
 
+    # 赋予树节点id属性
+    max_item_id, max_taxonomy_id = max(items), max(taxonomy_set)
+    # 右边界不包括
+    forest.nodes['item'].data['id'] = torch.LongTensor(list(range(0, max_item_id + 1)))
+    forest.nodes['taxonomy'].data['id'] = torch.LongTensor(list(range(0, max_taxonomy_id + 1)))
 
-# 生成意图森林
-def generate_intent_forest(data):
-    users = data['user'].unique()
+    # 提取子图，去除不必要的节点
+    forest = dgl.node_subgraph(forest, {'item': list(set(items)), 'taxonomy': list(set(t_childs + t_parents))})
 
-    for user in users:
-        generate_user_intent_forest(user, data.loc[data['user'] == user]['item'].values)
-
-    return None
-
-
-def random_neg(l, r, s):
-    pass
+    return root, forest
 
 
 # 参照SASRec源码
-def sample_function(train, valid, user_num, item_num, batch_size, maxlen, result_queue, SEED):
+def sample_function(train, taxonomy_tree, user_num, item_num, batch_size, L, result_queue, SEED):
     def sample():
         # [left, right)
         user = np.random.randint(1, user_num + 1)
-        while len(train[user] <= 1):
+        while len(train[user]) <= 1:
             user = np.random.randint(1, user_num + 1)
 
-        seq = np.zeros([maxlen], dtype=np.int32)
-        nxt = train[user][-1]
-        idx = maxlen - 1
+        seq = np.zeros([L], dtype=np.int32)
+        pos = train[user][-1]
+        neg = np.random.randint(1, item_num + 1)
+        while neg in train[user]:
+            neg = np.random.randint(1, item_num + 1)
+        idx = L - 1
 
-        root, leaf, forest = generate_user_intent_forest(user, train[user])
+        for item in reversed(train[user][:-1]):
+            seq[idx] = item
+            idx -= 1
 
+            if idx < 0:
+                break
+
+        root, forest = generate_user_intent_forest(user, train[user][:-1], taxonomy_tree)
+
+        return user, seq, pos, neg, root, forest
 
     np.random.seed(SEED)
     while True:
@@ -85,13 +89,14 @@ def sample_function(train, valid, user_num, item_num, batch_size, maxlen, result
 
 # 参照SASRec源码
 class Sampler(object):
-    def __init__(self, train, valid, user_num, item_num, batch_size, maxlen, n_workes=1):
+    def __init__(self, train, taxonomy_tree, user_num, item_num, batch_size, L, n_workes=1):
         self.result_queue = Queue(maxsize=n_workes * 10)
         self.processors = []
         for i in range(n_workes):
             self.processors.append(
                 Process(target=sample_function,
-                        args=(train, valid, user_num, item_num, batch_size, maxlen, self.result_queue, np.random.randint(2e9)))
+                        args=(train, taxonomy_tree, user_num, item_num, batch_size, L, self.result_queue,
+                              np.random.randint(2e9)))
             )
             self.processors[-1].daemon = True
             self.processors[-1].start()

@@ -8,6 +8,7 @@ def read_meta_data(n_hop=2):
     # item从1开始，0充当padding
     # 为了统一，taxonomy也从1开始(或者taxonomy也需要padding。即taxonomy不足目标数时，利用padding代替)
     taxonomy_cnt = 1
+    taxonomy2id['0'] = 0
 
     with open('meta_Grocery_and_Gourmet_Food.json', 'r') as f:
         for line in f.readlines():
