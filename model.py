@@ -1,15 +1,46 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import dgl.nn.pytorch as dglnn
+
+
+# 异构图之间也是调用GAT卷积
+class GATLayer(nn.Module):
+    def __init__(self, in_feats, out_feats, num_heads):
+        super(GATLayer, self).__init__()
+
+        # 可能需要设置allow_zero_in_degree，因为叶子节点的入度为0（先不设置试试）
+        self.conv = dglnn.HeteroGraphConv({
+            'i2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads),
+            't2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads)
+        })
+
+    def forward(self, g, feat):
+        res = self.conv(g, feat)
+
+        return
+
+
+class HGTLayer(nn.Module):
+    def __init__(self, in_feats, out_feats):
+        super(HGTLayer, self).__init__()
+
+        self.conv = dglnn.HeteroGraphConv({
+            'i2t': dglnn.HGTConv(),
+            't2t': dglnn.HGTConv()
+        })
+
+    def forward(self):
+        pass
 
 
 class IF4SR(nn.Module):
     def __init__(self, args, item_num, taxonomy_num):
         super(IF4SR, self).__init__()
 
-        self.item_embed = nn.Embedding(item_num, args.hidden_unit, padding_idx=0)
+        self.item_embed = nn.Embedding(item_num, args.hidden_units, padding_idx=0)
         # 标签单独初始化
-        self.taxonomy_embed = nn.Embedding(taxonomy_num, args.hidden_unit, padding_idx=0)
+        self.taxonomy_embed = nn.Embedding(taxonomy_num, args.hidden_units, padding_idx=0)
 
         self.dropout = nn.Dropout(p=args.dropout_rate)
 
@@ -23,22 +54,32 @@ class IF4SR(nn.Module):
         self.fcb_transform2 = nn.ModuleList()
         self.fcb_transform3 = nn.ModuleList()
 
-        self.weighted_vector = nn.Linear(args.hidden_unit, 1, bias=False)
+        self.weighted_vector = nn.Linear(args.hidden_units, 1, bias=False)
 
-        for _ in range(args.gip_block_num):
+        for _ in range(args.gip_block_nums):
             # scb
-            self.scb_layernorms.append(nn.LayerNorm(args.hidden_unit, eps=1e-8))
+            self.scb_layernorms.append(nn.LayerNorm(args.hidden_units, eps=1e-8))
             # transform_matrix1: (hidden_unit, L)
-            self.scb_transform1.append(nn.Linear(args.L, args.scb_hidden_unit, bias=False))
+            self.scb_transform1.append(nn.Linear(args.L, args.scb_hidden_units, bias=False))
             # transform_matrix2: (L, hidden_units)
-            self.scb_transform2.append(nn.Linear(args.scb_hidden_unit, args.L, bias=False))
+            self.scb_transform2.append(nn.Linear(args.scb_hidden_units, args.L, bias=False))
             # fcb
-            self.fcb_layernorms.append(nn.LayerNorm(args.hidden_unit, eps=1e-8))
+            self.fcb_layernorms.append(nn.LayerNorm(args.hidden_units, eps=1e-8))
             self.fcb_transform1.append(
-                nn.Linear(int(args.hidden_unit / args.fcb_head_num), args.fcb_hidden_unit, bias=False))
+                nn.Linear(int(args.hidden_units / args.fcb_head_nums), args.fcb_hidden_units, bias=False))
             self.fcb_transform2.append(
-                nn.Linear(args.fcb_hidden_unit, int(args.hidden_unit / args.fcb_head_num), bias=False))
-            self.fcb_transform3.append(nn.Linear(args.hidden_unit, args.hidden_unit, bias=False))
+                nn.Linear(args.fcb_hidden_units, int(args.hidden_units / args.fcb_head_nums), bias=False))
+            self.fcb_transform3.append(nn.Linear(args.hidden_units, args.hidden_units, bias=False))
+
+        self.gnn_layer = nn.ModuleList()
+
+        for _ in range(args.gnn_layers):
+            if args.gnn_conv == 'GAT':
+                new_gnn_layer = GATLayer(args.hidden_units, args.hidden_units, args.fcb_head_nums)
+            elif args.gnn_conv == 'HGT':
+                new_gnn_layer = HGTLayer()
+
+            self.gnn_layer.append(new_gnn_layer)
 
         self.args = args
         self.init_params()
@@ -67,8 +108,12 @@ class IF4SR(nn.Module):
         forest = forest.to(self.args.device)
         root = torch.LongTensor(root).to(self.args.device)
 
-        forest.nodes['item'].data['V'] = self.item_embed(forest.nodes['item'].data['id'].to(self.args.device))
-        forest.nodes['taxonomy'].data['T'] = self.taxonomy_embed(forest.nodes['taxonomy'].data['id'].to(self.args.device))
+        forest.nodes['item'].data['h'] = self.item_embed(forest.nodes['item'].data['id'].to(self.args.device))
+        forest.nodes['taxonomy'].data['h'] = self.taxonomy_embed(forest.nodes['taxonomy'].data['id'].to(self.args.device))
+
+        for layer in range(self.args.gnn_layers):
+            # 前向传播
+            self.gnn_layer[layer].forward()
 
         local_intention = None
 
@@ -78,7 +123,7 @@ class IF4SR(nn.Module):
         # item embedding: (batch_size, L, hidden_unit) 第0层
         V = self.item_embed(torch.LongTensor(seq).to(self.args.device))
 
-        for i in range(self.args.gip_block_num):
+        for i in range(self.args.gip_block_nums):
             # scb
             normed_V = self.scb_layernorms[i](V)
             transposed_normed_V = torch.transpose(normed_V, 1, 2)
@@ -89,10 +134,10 @@ class IF4SR(nn.Module):
             # fcb
             normed_V_scb = self.fcb_layernorms[i](V_scb)
             concated = None
-            for h in range(self.args.fcb_head_num):
+            for h in range(self.args.fcb_head_nums):
                 # 右边界不包括
-                start, end = int(h * (self.args.hidden_unit / self.args.fcb_head_num)), int(
-                    (h + 1) * (self.args.hidden_unit / self.args.fcb_head_num))
+                start, end = int(h * (self.args.hidden_units / self.args.fcb_head_nums)), int(
+                    (h + 1) * (self.args.hidden_units / self.args.fcb_head_nums))
                 partial = normed_V_scb[:, :, start:end]
 
                 headn_out = self.fcb_transform2[i](F.gelu(self.fcb_transform1[i](partial)))

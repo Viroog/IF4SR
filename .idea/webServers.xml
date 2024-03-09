@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="37262fa6-b9d6-407d-b346-63e3cbda2c4d" name="virgoo">
+        <fileTransfer rootFolder="/home/zhan" accessType="SFTP" host="10.154.44.36" port="22" sshConfigId="dd66c63a-83fa-4e39-b5bb-c8854e393569" sshConfig="zhan@10.154.44.36:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
