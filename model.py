@@ -1,3 +1,4 @@
+import dgl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,16 +10,16 @@ class GATLayer(nn.Module):
     def __init__(self, in_feats, out_feats, num_heads):
         super(GATLayer, self).__init__()
 
-        # 可能需要设置allow_zero_in_degree，因为叶子节点的入度为0（先不设置试试）
+        # aggregate参数指定与否都没有太大关系，因为每个dst node只有一种src node
         self.conv = dglnn.HeteroGraphConv({
-            'i2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads),
-            't2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads)
+            'i2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads, allow_zero_in_degree=True),
+            't2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads, allow_zero_in_degree=True)
         })
 
     def forward(self, g, feat):
-        res = self.conv(g, feat)
+        rsts = self.conv(g, feat)
 
-        return
+        return rsts
 
 
 class HGTLayer(nn.Module):
@@ -75,7 +76,7 @@ class IF4SR(nn.Module):
 
         for _ in range(args.gnn_layers):
             if args.gnn_conv == 'GAT':
-                new_gnn_layer = GATLayer(args.hidden_units, args.hidden_units, args.fcb_head_nums)
+                new_gnn_layer = GATLayer(args.hidden_units, int(args.hidden_units / args.gnn_head_nums), args.gnn_head_nums)
             elif args.gnn_conv == 'HGT':
                 new_gnn_layer = HGTLayer()
 
@@ -106,14 +107,26 @@ class IF4SR(nn.Module):
     def get_local_intention(self, root, forest):
 
         forest = forest.to(self.args.device)
-        root = torch.LongTensor(root).to(self.args.device)
+        # root = torch.LongTensor(root).to(self.args.device)
 
         forest.nodes['item'].data['h'] = self.item_embed(forest.nodes['item'].data['id'].to(self.args.device))
         forest.nodes['taxonomy'].data['h'] = self.taxonomy_embed(forest.nodes['taxonomy'].data['id'].to(self.args.device))
 
         for layer in range(self.args.gnn_layers):
-            # 前向传播
-            self.gnn_layer[layer].forward()
+            feat = {
+                'item': forest.nodes['item'].data['h'],
+                'taxonomy': forest.nodes['taxonomy'].data['h']
+            }
+            # 只是返回了结果，图中的节点数据并没有被更新
+            rsts = self.gnn_layer[layer].forward(forest, feat)
+
+            # 更新图中的节点数据
+            forest.nodes['taxonomy'].data['h'] = rsts['taxonomy'].view(rsts['taxonomy'].shape[0], -1)
+
+        # 要不要将每层的根节向量记录起来后累加 待定
+
+        # 反转batch操作
+        dgl.unbatch(forest)
 
         local_intention = None
 
