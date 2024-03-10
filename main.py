@@ -1,20 +1,27 @@
 import argparse
 import json
 import pickle
+import time
 
 import dgl
+import torch
+
 from model import IF4SR
 from utils import data_partition, Sampler
 import torch.optim as optim
 import torch.nn as nn
 import numpy as np
+from utils import evaluate, evaluate_valid
+
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default='grocery', help='dataset name')
 # 模型的超参数
 parser.add_argument('--epoch', type=int, default=200, help='training epoch')
 parser.add_argument('--L', type=int, default=50, help='max length of sequence')
-parser.add_argument('--batch_size', type=int, default=128, help='batch size')
+parser.add_argument('--batch_size', type=int, default=1024, help='batch size')
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
 parser.add_argument('--l2', type=float, default=1e-4, help='l2 regularization')
 parser.add_argument('--hidden_units', type=int, default=50, help='hidden dimension')
@@ -39,12 +46,26 @@ args = parser.parse_args()
 
 if __name__ == '__main__':
 
-    train, valid, test, user_num, item_num = data_partition(args.dataset)
+    dataset = data_partition(args.dataset)
+    train, valid, test, user_num, item_num = dataset
+
     num_batch = len(train) // args.batch_size
 
     taxonomy_tree_path = f'./dataset/{args.dataset}/item_taxonomy.dict'
     with open(taxonomy_tree_path, 'rb') as f:
         taxonomy_tree = pickle.load(f)
+
+    # 统计各阶的标签种类，同时方便后面的root填充
+    taxonomy_cnt = {}
+    for hop in range(args.gnn_layers):
+        taxonomy_cnt[hop + 1] = set()
+
+    for item, taxonomies in taxonomy_tree.items():
+        for idx, taxonomy in enumerate(taxonomies):
+            taxonomy_cnt[idx + 1].add(taxonomy)
+
+    for hop in range(args.gnn_layers):
+        print(f'{hop + 1} order taxonomy nums: {len(taxonomy_cnt[hop + 1])}')
 
     taxonomy_path = f'./dataset/{args.dataset}/taxonomy2id.json'
     with open(taxonomy_path, 'r') as f:
@@ -52,8 +73,10 @@ if __name__ == '__main__':
     taxonomy_num = len(taxonomy2id)
 
     sampler = Sampler(train, taxonomy_tree, user_num, item_num, batch_size=args.batch_size, L=args.L,
-                      n_workes=3)
-    model = IF4SR(args, item_num, taxonomy_num).to(args.device)
+                      n_workers=3)
+    model = IF4SR(args, item_num, taxonomy_num, len(taxonomy_cnt[1])).to(args.device)
+
+    evaluate_valid(model, dataset, taxonomy_tree, args)
 
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2)
@@ -61,23 +84,39 @@ if __name__ == '__main__':
     model.train()
 
     for epoch in range(args.epoch):
+        epoch_loss = 0
+        t1 = time.time()
         for step in range(num_batch):
             # 每个batch中的root数量都不相等，需要解决一下
             user, seq, pos, neg, root, forest = sampler.next_batch()
-            user, seq, pos, neg, root = np.array(user), np.array(seq), np.array(pos), np.array(neg), np.array(root)
 
+            user, seq, pos, neg = np.array(user), np.array(seq), np.array(pos), np.array(neg)
             batch_forest = dgl.batch(list(forest))
 
             pos_logit, neg_logit = model(user, seq, pos, neg, root, batch_forest)
 
-            loss = None
+            pos_label, neg_label = torch.ones(pos_logit.shape, device=args.device), torch.zeros(neg_logit.shape,
+                                                                                                device=args.device)
+
+            loss = criterion(pos_logit, pos_label)
+            loss += criterion(neg_logit, neg_label)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
+            epoch_loss += loss.item()
+
+        t2 = time.time()
+        print(f'epoch: {epoch + 1}, cost_time: {t2 - t1}, loss: {epoch_loss / num_batch}')
+
         if (epoch + 1) % 20 == 0:
             model.eval()
+
+            valid_ndcg, valid_hit = evaluate_valid(model, dataset, taxonomy_tree, args)
+            test_ndcg, test_hit = evaluate(model, dataset, taxonomy_tree, args)
+
+            print(f'epoch: {epoch + 1}, valid (NDCG@10:{valid_ndcg}, HIT@10:{valid_hit}), test (NDCG@10:{test_ndcg}, HIT@10: {test_hit})')
 
             model.train()
 

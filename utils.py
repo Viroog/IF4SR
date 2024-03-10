@@ -1,3 +1,6 @@
+import copy
+import random
+
 import dgl
 import torch
 from collections import defaultdict
@@ -49,7 +52,7 @@ def generate_user_intent_forest(user, seq, taxonomy_tree):
     # 提取子图，去除不必要的节点
     forest = dgl.node_subgraph(forest, {'item': list(set(items)), 'taxonomy': list(set(t_childs + t_parents))})
 
-    return root, forest
+    return list(root), forest
 
 
 # 参照SASRec源码
@@ -89,10 +92,10 @@ def sample_function(train, taxonomy_tree, user_num, item_num, batch_size, L, res
 
 # 参照SASRec源码
 class Sampler(object):
-    def __init__(self, train, taxonomy_tree, user_num, item_num, batch_size, L, n_workes=1):
-        self.result_queue = Queue(maxsize=n_workes * 10)
+    def __init__(self, train, taxonomy_tree, user_num, item_num, batch_size, L, n_workers=1):
+        self.result_queue = Queue(maxsize=n_workers * 10)
         self.processors = []
-        for i in range(n_workes):
+        for i in range(n_workers):
             self.processors.append(
                 Process(target=sample_function,
                         args=(train, taxonomy_tree, user_num, item_num, batch_size, L, self.result_queue,
@@ -108,6 +111,107 @@ class Sampler(object):
         for p in self.processors:
             p.terminate()
             p.join()
+
+
+def evaluate_valid(model, dataset, taxonomy_tree, args):
+    train, valid, test, user_num, item_num = copy.deepcopy(dataset)
+
+    ndcg = 0.0
+    hit = 0.0
+    valid_user = 0.0
+
+    if user_num > 10000:
+        users = random.sample(range(1, user_num + 1), 10000)
+    else:
+        users = range(1, user_num + 1)
+
+    for u in users:
+        if len(train[u]) < 1 or len(valid[u]) < 1:
+            continue
+
+        seq = np.zeros([args.L], dtype=int)
+        idx = args.L - 1
+        for i in reversed(train[u]):
+            seq[idx] = i
+            idx -= 1
+            if idx == -1:
+                break
+
+        rated = set(train[u])
+        rated.add(0)
+        item_idx = [valid[u][0]]
+        for _ in range(100):
+            t = np.random.randint(1, item_num + 1)
+            while t in rated:
+                t = np.random.randint(1, item_num + 1)
+                item_idx.append(t)
+
+        # 需要建树的物品为seq中不为0的元素
+        root, forest = generate_user_intent_forest(u, list(seq[seq != 0]), taxonomy_tree)
+
+        predictions = -model.predict()
+        predictions = predictions[0]
+
+        rank = predictions.argsort().argsort()[0].item()
+        valid_user += 1
+
+        if rank < 10:
+            ndcg += 1 / np.log2(rank + 2)
+            hit += 1
+
+    return ndcg / valid_user, hit / valid_user
+
+
+def evaluate(model, dataset, tree_taxonomy, args):
+    train, valid, test, user_num, item_num = copy.deepcopy(dataset)
+
+    ndcg = 0.0
+    hit = 0.0
+    valid_user = 0.0
+
+    if user_num > 10000:
+        users = random.sample(range(1, user_num + 1), 10000)
+    else:
+        users = range(1, user_num + 1)
+
+    for u in users:
+
+        if len(train[u]) < 1 or len(test[u]) < 1:
+            continue
+
+        seq = np.zeros([args.L], dtype=int)
+        idx = args.L - 1
+        seq[idx] = valid[u][0]
+        idx -= 1
+
+        for i in reversed(train[u]):
+            seq[idx] = i
+            idx -= 1
+            if idx == -1:
+                break
+
+        rated = set(train[u])
+        rated.add(0)
+        item_idx = [test[u][0]]
+        for _ in range(100):
+            t = np.random.randint(1, item_num + 1)
+            while t in rated:
+                t = np.random.randint(1, item_num + 1)
+            item_idx.append(t)
+
+        root, forest = generate_user_intent_forest(u, list(seq[seq != 0]), tree_taxonomy)
+
+        predictions = -model.predict()
+        predictions = predictions[0]
+
+        rank = predictions.argsort().argsort()[0].item()
+        valid_user += 1
+
+        if rank < 10:
+            ndcg += 1 / np.log2(rank + 2)
+            hit += 1
+
+    return ndcg / valid_user, hit / valid_user
 
 
 # 参照SASRec源码

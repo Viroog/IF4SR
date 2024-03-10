@@ -12,8 +12,8 @@ class GATLayer(nn.Module):
 
         # aggregate参数指定与否都没有太大关系，因为每个dst node只有一种src node
         self.conv = dglnn.HeteroGraphConv({
-            'i2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads, allow_zero_in_degree=True),
-            't2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads, allow_zero_in_degree=True)
+            'i2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads),
+            't2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads)
         })
 
     def forward(self, g, feat):
@@ -36,12 +36,13 @@ class HGTLayer(nn.Module):
 
 
 class IF4SR(nn.Module):
-    def __init__(self, args, item_num, taxonomy_num):
+    def __init__(self, args, item_num, taxonomy_num, first_taxonomy_num):
         super(IF4SR, self).__init__()
 
-        self.item_embed = nn.Embedding(item_num, args.hidden_units, padding_idx=0)
+        self.item_embed = nn.Embedding(item_num + 1, args.hidden_units, padding_idx=0)
         # 标签单独初始化
-        self.taxonomy_embed = nn.Embedding(taxonomy_num, args.hidden_units, padding_idx=0)
+        self.taxonomy_embed = nn.Embedding(taxonomy_num + 1, args.hidden_units, padding_idx=0)
+        self.first_taxonomy_num = first_taxonomy_num
 
         self.dropout = nn.Dropout(p=args.dropout_rate)
 
@@ -76,7 +77,8 @@ class IF4SR(nn.Module):
 
         for _ in range(args.gnn_layers):
             if args.gnn_conv == 'GAT':
-                new_gnn_layer = GATLayer(args.hidden_units, int(args.hidden_units / args.gnn_head_nums), args.gnn_head_nums)
+                new_gnn_layer = GATLayer(args.hidden_units, int(args.hidden_units / args.gnn_head_nums),
+                                         args.gnn_head_nums)
             elif args.gnn_conv == 'HGT':
                 new_gnn_layer = HGTLayer()
 
@@ -95,8 +97,6 @@ class IF4SR(nn.Module):
                     if self.args.taxonomy_init_weight == 'default':
                         pass
                     # 剩余未完成
-                    elif self.args.taxonomy_init_weight == 'LINE':
-                        pass
                     elif self.args.taxonomy_init_weight == 'word2vec':
                         pass
             except:
@@ -110,7 +110,8 @@ class IF4SR(nn.Module):
         # root = torch.LongTensor(root).to(self.args.device)
 
         forest.nodes['item'].data['h'] = self.item_embed(forest.nodes['item'].data['id'].to(self.args.device))
-        forest.nodes['taxonomy'].data['h'] = self.taxonomy_embed(forest.nodes['taxonomy'].data['id'].to(self.args.device))
+        forest.nodes['taxonomy'].data['h'] = self.taxonomy_embed(
+            forest.nodes['taxonomy'].data['id'].to(self.args.device))
 
         for layer in range(self.args.gnn_layers):
             feat = {
@@ -126,9 +127,28 @@ class IF4SR(nn.Module):
         # 要不要将每层的根节向量记录起来后累加 待定
 
         # 反转batch操作
-        dgl.unbatch(forest)
+        unbatch_forest = dgl.unbatch(forest)
 
-        local_intention = None
+        # 这里可以先创建一个全0的向量
+        # local_intention = None
+        local_intention = torch.zeros((self.args.batch_size, self.first_taxonomy_num, self.args.hidden_units), device=self.args.device)
+
+        for i in range(self.args.batch_size):
+            indices = torch.where(torch.isin(unbatch_forest[i].nodes['taxonomy'].data['id'],
+                                             torch.LongTensor(root[i]).to(self.args.device)))
+            user_local_intention = unbatch_forest[i].nodes['taxonomy'].data['h'][indices]
+
+            local_intention[i, :user_local_intention.shape[0], :] = user_local_intention
+            # if user_local_intention.shape[0] < self.first_taxonomy_num:
+            #     # 当pad有四个参数时，代表对最后两个维度扩充，左右上下
+            #     user_local_intention = F.pad(user_local_intention,
+            #                                  (0, 0, 0, self.first_taxonomy_num - user_local_intention.shape[0]),
+            #                                  value=0)
+            #
+            # if local_intention is None:
+            #     local_intention = user_local_intention.unsqueeze(dim=0)
+            # else:
+            #     local_intention = torch.concat([local_intention, user_local_intention.unsqueeze(dim=0)], dim=0)
 
         return local_intention
 
@@ -176,10 +196,27 @@ class IF4SR(nn.Module):
 
         global_intention = self.get_global_intention(seq)
         local_intention = self.get_local_intention(root, forest)
+        #
+        # local_intention = torch.rand(size=(self.args.batch_size, self.first_taxonomy_num, self.args.hidden_units), device=self.args.device)
+
+        # 填充项不能参加softmax函数，影响了权重
+        # 创建掩码，将不参加的位置设置为负无穷，负无穷在softmax中不参与计算
+        mul_res = torch.sum(global_intention.unsqueeze(dim=1) * local_intention, dim=-1)
+        mask = (mul_res != 0).float()
+        masked_mul_res = torch.where(mask != 0, mul_res, float('-inf'))
+
+        local_intention_weight = F.softmax(masked_mul_res, dim=-1)
+        intention = global_intention + torch.sum(local_intention_weight.unsqueeze(dim=-1) * local_intention, dim=1)
 
         pos_embed = self.item_embed(torch.LongTensor(pos).to(self.args.device))
         neg_embed = self.item_embed(torch.LongTensor(neg).to(self.args.device))
 
-        # 计算global intention和local intention的相似度作为权重，进行加权求和
-
         # 与正负样本预测评分
+        pos_logit = torch.sum(intention * pos_embed, dim=-1)
+        neg_logit = torch.sum(intention * neg_embed, dim=-1)
+
+        return pos_logit, neg_logit
+
+    def predict(self, seq, items, root, forest):
+
+        global_intention = self.get_global_intention(seq)
