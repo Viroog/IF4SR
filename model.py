@@ -131,9 +131,9 @@ class IF4SR(nn.Module):
 
         # 这里可以先创建一个全0的向量
         # local_intention = None
-        local_intention = torch.zeros((self.args.batch_size, self.first_taxonomy_num, self.args.hidden_units), device=self.args.device)
+        local_intention = torch.zeros((len(unbatch_forest), self.first_taxonomy_num, self.args.hidden_units), device=self.args.device)
 
-        for i in range(self.args.batch_size):
+        for i in range(len(unbatch_forest)):
             indices = torch.where(torch.isin(unbatch_forest[i].nodes['taxonomy'].data['id'],
                                              torch.LongTensor(root[i]).to(self.args.device)))
             user_local_intention = unbatch_forest[i].nodes['taxonomy'].data['h'][indices]
@@ -192,13 +192,7 @@ class IF4SR(nn.Module):
 
         return global_intention
 
-    def forward(self, user, seq, pos, neg, root, forest):
-
-        global_intention = self.get_global_intention(seq)
-        local_intention = self.get_local_intention(root, forest)
-        #
-        # local_intention = torch.rand(size=(self.args.batch_size, self.first_taxonomy_num, self.args.hidden_units), device=self.args.device)
-
+    def get_intention(self, global_intention, local_intention):
         # 填充项不能参加softmax函数，影响了权重
         # 创建掩码，将不参加的位置设置为负无穷，负无穷在softmax中不参与计算
         mul_res = torch.sum(global_intention.unsqueeze(dim=1) * local_intention, dim=-1)
@@ -206,7 +200,17 @@ class IF4SR(nn.Module):
         masked_mul_res = torch.where(mask != 0, mul_res, float('-inf'))
 
         local_intention_weight = F.softmax(masked_mul_res, dim=-1)
+
         intention = global_intention + torch.sum(local_intention_weight.unsqueeze(dim=-1) * local_intention, dim=1)
+
+        return intention
+
+    def forward(self, user, seq, pos, neg, root, forest):
+
+        global_intention = self.get_global_intention(seq)
+        local_intention = self.get_local_intention(root, forest)
+
+        intention = self.get_intention(global_intention, local_intention)
 
         pos_embed = self.item_embed(torch.LongTensor(pos).to(self.args.device))
         neg_embed = self.item_embed(torch.LongTensor(neg).to(self.args.device))
@@ -218,5 +222,16 @@ class IF4SR(nn.Module):
         return pos_logit, neg_logit
 
     def predict(self, seq, items, root, forest):
-
         global_intention = self.get_global_intention(seq)
+        local_intention = self.get_local_intention(root, forest)
+
+        # batch_size = 1
+        # (batch_size, hidden_units)
+        intention = self.get_intention(global_intention, local_intention)
+
+        # (batch_size, len(items), hidden_units)
+        item_embed = self.item_embed(torch.LongTensor(items).to(self.args.device))
+
+        logit = item_embed.matmul(intention.unsqueeze(-1)).squeeze(-1)
+
+        return logit

@@ -34,14 +34,14 @@ def generate_user_intent_forest(user, seq, taxonomy_tree):
             if i == 0:
                 root.add(item_taxonomies[i])
 
-    forest_data = {('item', 'i2t', 'taxonomy'): (torch.tensor(items), torch.tensor(items_parent)),
-                   ('taxonomy', 't2t', 'taxonomy'): (torch.tensor(t_childs), torch.tensor(t_parents))}
+    forest_data = {('item', 'i2t', 'taxonomy'): (torch.LongTensor(items), torch.LongTensor(items_parent)),
+                   ('taxonomy', 't2t', 'taxonomy'): (torch.LongTensor(t_childs), torch.LongTensor(t_parents))}
     # 这样建出来的森林有一个问题是多了很多零散的节点，这些节点出度入度均为0
     # 根节点：出度为0，入度不为0        叶子节点：出度不为0，入度为0     其余节点：出度入度均不为0
     forest = dgl.heterograph(forest_data)
 
-    # 无重复的叶子节点集合以及无重复的标签节点集合
-    item_set, taxonomy_set = list(set(items)), list(set(t_childs + t_parents))
+    # 无重复的标签节点集合
+    taxonomy_set = list(set(t_childs + t_parents))
 
     # 赋予树节点id属性
     max_item_id, max_taxonomy_id = max(items), max(taxonomy_set)
@@ -129,7 +129,7 @@ def evaluate_valid(model, dataset, taxonomy_tree, args):
         if len(train[u]) < 1 or len(valid[u]) < 1:
             continue
 
-        seq = np.zeros([args.L], dtype=int)
+        seq = np.zeros([args.L], dtype=np.int32)
         idx = args.L - 1
         for i in reversed(train[u]):
             seq[idx] = i
@@ -144,12 +144,18 @@ def evaluate_valid(model, dataset, taxonomy_tree, args):
             t = np.random.randint(1, item_num + 1)
             while t in rated:
                 t = np.random.randint(1, item_num + 1)
-                item_idx.append(t)
+            item_idx.append(t)
 
         # 需要建树的物品为seq中不为0的元素
         root, forest = generate_user_intent_forest(u, list(seq[seq != 0]), taxonomy_tree)
 
-        predictions = -model.predict()
+        # 全部操作都需要增加一个维度
+        seq = np.expand_dims(np.array(seq), axis=0)
+        item_idx = np.expand_dims(np.array(np.array(item_idx)), axis=0)
+        root = [root]
+        batch_forest = dgl.batch([forest])
+
+        predictions = -model.predict(seq, item_idx, root, batch_forest)
         predictions = predictions[0]
 
         rank = predictions.argsort().argsort()[0].item()
@@ -179,7 +185,7 @@ def evaluate(model, dataset, tree_taxonomy, args):
         if len(train[u]) < 1 or len(test[u]) < 1:
             continue
 
-        seq = np.zeros([args.L], dtype=int)
+        seq = np.zeros([args.L], dtype=np.int32)
         idx = args.L - 1
         seq[idx] = valid[u][0]
         idx -= 1
@@ -201,7 +207,12 @@ def evaluate(model, dataset, tree_taxonomy, args):
 
         root, forest = generate_user_intent_forest(u, list(seq[seq != 0]), tree_taxonomy)
 
-        predictions = -model.predict()
+        seq = np.expand_dims(np.array(seq), axis=0)
+        item_idx = np.expand_dims(np.array(np.array(item_idx)), axis=0)
+        root = [root]
+        batch_forest = dgl.batch([forest])
+
+        predictions = -model.predict(seq, item_idx, root, batch_forest)
         predictions = predictions[0]
 
         rank = predictions.argsort().argsort()[0].item()
