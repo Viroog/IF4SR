@@ -9,7 +9,7 @@ import numpy as np
 
 def generate_intent_forest(u, data_type):
 
-    # 用户整个交互序列小于3，则不生成任何数据
+    # 用户整个交互序列小于3，则不生成任何数据(这里需要细致钻一下条件)
     if len(interaction[u]) < 3:
         return
 

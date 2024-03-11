@@ -41,7 +41,7 @@ class IF4SR(nn.Module):
 
         self.item_embed = nn.Embedding(item_num + 1, args.hidden_units, padding_idx=0)
         # 标签单独初始化
-        self.taxonomy_embed = nn.Embedding(taxonomy_num + 1, args.hidden_units, padding_idx=0)
+        self.taxonomy_embed = nn.Embedding(taxonomy_num, args.hidden_units, padding_idx=0)
         self.first_taxonomy_num = first_taxonomy_num
 
         self.dropout = nn.Dropout(p=args.dropout_rate)
@@ -94,11 +94,12 @@ class IF4SR(nn.Module):
                 nn.init.xavier_normal_(param.data)
                 # 单独初始化
                 if name == 'taxonomy_embed.weight':
-                    if self.args.taxonomy_init_weight == 'default':
+                    if self.args.taxonomy_init_mode == 'default':
                         pass
-                    # 剩余未完成
-                    elif self.args.taxonomy_init_weight == 'word2vec':
-                        pass
+                    elif self.args.taxonomy_init_mode == 'glove':
+                        embed_path = f'./dataset/{self.args.dataset}/taxonomy_embed.pth'
+                        embed_data = torch.load(embed_path)
+                        self.taxonomy_embed.weight.data = embed_data
             except:
                 pass
 

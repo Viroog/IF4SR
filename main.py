@@ -21,13 +21,13 @@ parser.add_argument('--dataset', type=str, default='grocery', help='dataset name
 # 模型的超参数
 parser.add_argument('--epoch', type=int, default=200, help='training epoch')
 parser.add_argument('--L', type=int, default=50, help='max length of sequence')
-parser.add_argument('--batch_size', type=int, default=128, help='batch size')
+parser.add_argument('--batch_size', type=int, default=1024, help='batch size')
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
 parser.add_argument('--l2', type=float, default=1e-4, help='l2 regularization')
 parser.add_argument('--hidden_units', type=int, default=50, help='hidden dimension')
 parser.add_argument('--dropout_rate', type=float, default=0.2, help='dropout rate')
 parser.add_argument('--device', type=str, default='cuda:0', help='cuda or cpu')
-parser.add_argument('--taxonomy_init_mode', type=str, default='default', choices=['glove', 'default'],
+parser.add_argument('--taxonomy_init_mode', type=str, default='glove', choices=['glove', 'default'],
                     help='how to init taxonomy embedding')
 # global intention的超参数
 parser.add_argument('--gip_block_nums', type=int, default=2, choices=[1, 2, 3],
@@ -73,6 +73,7 @@ if __name__ == '__main__':
     taxonomy_path = f'./dataset/{args.dataset}/taxonomy2id.json'
     with open(taxonomy_path, 'r') as f:
         taxonomy2id = json.load(f)
+    # 这个taxonomy_num已经包括了0，因此在模型中的embedding不需要+1
     taxonomy_num = len(taxonomy2id)
 
     sampler = Sampler(train, taxonomy_tree, user_num, item_num, batch_size=args.batch_size, L=args.L,
@@ -124,6 +125,7 @@ if __name__ == '__main__':
             if test_ndcg > best_ndcg or test_hit > best_hit:
                 best_ndcg, best_hit = test_ndcg, test_hit
                 best_model = model
+                now_tolerant = 0
 
                 model_path = f'trained/{args.dataset}/model.pth'
                 torch.save(best_model, model_path)
