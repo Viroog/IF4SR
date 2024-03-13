@@ -14,6 +14,7 @@ import numpy as np
 from utils import evaluate, evaluate_valid
 
 import torch.multiprocessing
+
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 parser = argparse.ArgumentParser()
@@ -77,6 +78,7 @@ if __name__ == '__main__':
     taxonomy_num = len(taxonomy2id)
 
     sampler = Sampler(train, taxonomy_tree, user_num, item_num, batch_size=args.batch_size, L=args.L,
+                      first_taxonomy_num=len(taxonomy_cnt[1]),
                       n_workers=3)
     model = IF4SR(args, item_num, taxonomy_num, len(taxonomy_cnt[1])).to(args.device)
 
@@ -91,15 +93,16 @@ if __name__ == '__main__':
 
     for epoch in range(args.epoch):
         epoch_loss = 0
+
         t1 = time.time()
         for step in range(num_batch):
             # 每个batch中的root数量都不相等，需要解决一下
             user, seq, pos, neg, root, forest = sampler.next_batch()
+            user, seq, pos, neg, root = np.array(user), np.array(seq), np.array(pos), np.array(neg), np.array(root)
 
-            user, seq, pos, neg = np.array(user), np.array(seq), np.array(pos), np.array(neg)
             batch_forest = dgl.batch(list(forest))
 
-            pos_logit, neg_logit = model(user, seq, pos, neg, root, batch_forest)
+            pos_logit, neg_logit = model(seq, pos, neg, root, batch_forest)
 
             pos_label, neg_label = torch.ones(pos_logit.shape, device=args.device), torch.zeros(neg_logit.shape,
                                                                                                 device=args.device)
@@ -136,7 +139,8 @@ if __name__ == '__main__':
             if now_tolerant > args.max_tolerant:
                 break
 
-            print(f'epoch: {epoch + 1}, valid (NDCG@10:{valid_ndcg}, HIT@10:{valid_hit}), test (NDCG@10:{test_ndcg}, HIT@10: {test_hit})')
+            print(
+                f'epoch: {epoch + 1}, valid (NDCG@10:{valid_ndcg}, HIT@10:{valid_hit}), test (NDCG@10:{test_ndcg}, HIT@10: {test_hit})')
 
             model.train()
 

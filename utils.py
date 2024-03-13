@@ -1,4 +1,5 @@
 import copy
+import os
 import random
 
 import dgl
@@ -6,13 +7,14 @@ import torch
 from collections import defaultdict
 from multiprocessing import Process, Queue
 import numpy as np
+from torch.utils.data import Dataset
 
 
 # 生成单个用户的意图森林
 # 先别管什么训练集、验证集和测试集，先将整个序列的意图树构建出来
-def generate_user_intent_forest(user, seq, taxonomy_tree):
+def generate_user_intent_forest(user, seq, taxonomy_tree, first_taxonomy_num):
     # 森林中每棵树的根节点集合
-    root = set()
+    absolute_root = set()
 
     items, items_parent = [], []
     t_childs, t_parents = [], []
@@ -32,7 +34,7 @@ def generate_user_intent_forest(user, seq, taxonomy_tree):
 
             # 加入根节点
             if i == 0:
-                root.add(item_taxonomies[i])
+                absolute_root.add(item_taxonomies[i])
 
     forest_data = {('item', 'i2t', 'taxonomy'): (torch.LongTensor(items), torch.LongTensor(items_parent)),
                    ('taxonomy', 't2t', 'taxonomy'): (torch.LongTensor(t_childs), torch.LongTensor(t_parents))}
@@ -52,11 +54,24 @@ def generate_user_intent_forest(user, seq, taxonomy_tree):
     # 提取子图，去除不必要的节点
     forest = dgl.node_subgraph(forest, {'item': list(set(items)), 'taxonomy': list(set(t_childs + t_parents))})
 
-    return list(root), forest
+    # 绝对root_id
+    # return list(absolute_root), forest
+    # 真实root_id在图中对应的节点id，
+    # tmp = forest.nodes['taxonomy'].data['id']
+    # tmp2 = torch.LongTensor(list(root))
+    # res = torch.where(torch.isin(tmp, tmp2))
+
+    # 相对root_id
+    relative_root = torch.where(torch.isin(forest.nodes['taxonomy'].data['id'], torch.LongTensor(list(absolute_root))))[0]
+
+    pad_relative_root = torch.full((first_taxonomy_num,), -1)
+    pad_relative_root[:relative_root.shape[0]] = relative_root
+
+    return pad_relative_root.detach().numpy(), forest
 
 
 # 参照SASRec源码
-def sample_function(train, taxonomy_tree, user_num, item_num, batch_size, L, result_queue, SEED):
+def sample_function(train, taxonomy_tree, user_num, item_num, batch_size, L, first_taxonomy_num, result_queue, SEED):
     def sample():
         # [left, right)
         user = np.random.randint(1, user_num + 1)
@@ -77,7 +92,7 @@ def sample_function(train, taxonomy_tree, user_num, item_num, batch_size, L, res
             if idx < 0:
                 break
 
-        root, forest = generate_user_intent_forest(user, train[user][:-1], taxonomy_tree)
+        root, forest = generate_user_intent_forest(user, train[user][:-1], taxonomy_tree, first_taxonomy_num)
 
         return user, seq, pos, neg, root, forest
 
@@ -92,14 +107,16 @@ def sample_function(train, taxonomy_tree, user_num, item_num, batch_size, L, res
 
 # 参照SASRec源码
 class Sampler(object):
-    def __init__(self, train, taxonomy_tree, user_num, item_num, batch_size, L, n_workers=1):
+    def __init__(self, train, taxonomy_tree, user_num, item_num, batch_size, L, first_taxonomy_num, n_workers=1):
         self.result_queue = Queue(maxsize=n_workers * 10)
         self.processors = []
         for i in range(n_workers):
             self.processors.append(
                 Process(target=sample_function,
-                        args=(train, taxonomy_tree, user_num, item_num, batch_size, L, self.result_queue,
-                              np.random.randint(2e9)))
+                        args=(
+                            train, taxonomy_tree, user_num, item_num, batch_size, L, first_taxonomy_num,
+                            self.result_queue,
+                            np.random.randint(2e9)))
             )
             self.processors[-1].daemon = True
             self.processors[-1].start()
@@ -255,3 +272,72 @@ def data_partition(dataset):
             test[user] = [interaction[user][-1]]
 
     return train, valid, test, user_num, item_num
+
+
+def load_data(data_path):
+    data_dir = []
+    dir_list = os.listdir(data_path)
+    dir_list.sort()
+
+    for file in dir_list:
+        data_dir.append(os.path.join(data_path, file))
+
+    return data_dir
+
+
+def generate_neg(l, r, interact):
+    neg = np.random.randint(l, r)
+    while neg in interact:
+        neg = np.random.randint(l, r)
+
+    return neg
+
+
+# new_main的数据加载方式
+class myFloder(Dataset):
+    def __init__(self, root_dir, loader, interact, item_num):
+        self.root = root_dir
+        self.loader = loader
+        self.dir_list = load_data(root_dir)
+        self.interact = interact
+        self.item_num = item_num
+        self.size = len(self.dir_list)
+
+    def __getitem__(self, index):
+        dir_ = self.dir_list[index]
+        data = self.loader(dir_)
+        return data, self.item_num, self.interact
+
+    def __len__(self):
+        return self.size
+
+
+def collate(data):
+    forest, user, seq, pos, neg, root = [], [], [], [], [], []
+
+    for d in data:
+        forest.append(d[0][0][0])
+        user.append(d[0][1]['user'])
+        # 加上detach()表明不需要计算梯度, 可能服务器和自己电脑上的numpy版本不一样
+        seq.append(d[0][1]['seq'].detach().numpy())
+        pos.append(d[0][1]['target'])
+        neg.append(generate_neg(1, d[1] + 1, d[2][user[-1].item()]))
+        # root是个张量，每个元素是一个张量
+        root.append(d[0][1]['root'].detach().numpy())
+
+    # 在collate中完成所有数据格式的转化，会大大减少IO时间，能够更加有效利用GPU
+    # 否则I/O时间是模型训练时间的十倍甚至百倍
+    return dgl.batch(forest), torch.LongTensor(user), torch.LongTensor(np.array(seq)), torch.LongTensor(
+        pos), torch.LongTensor(neg), torch.LongTensor(np.array(root))
+
+
+def collate_valid_test(data):
+    forest, user, seq, pos, neg, root = [], [], [], [], [], []
+
+    for d in data:
+        forest.append(d[0][0][0])
+        user.append(d[0][1]['user'])
+        seq.append(d[0][1]['seq'].detach().numpy())
+        root.append(d[0][1]['root'].detach().numpy())
+
+    return dgl.batch(forest), torch.LongTensor(user), torch.LongTensor(np.array(seq)), torch.LongTensor(), torch.LongTensor(np.array(root))

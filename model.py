@@ -1,8 +1,26 @@
+import time
+
 import dgl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import dgl.nn.pytorch as dglnn
+
+
+# 将返回结果传进来，逆向执行unbatch操作，还原节点id来代替unbatch操作
+def graph_taxonomy(forest, root, taxonomy_embed):
+    b_taxonomy_size = forest.batch_num_nodes('taxonomy')
+
+    # roll: (inputs, shifts, dims=None) 往指定方向位移，如果dims为None，则会flatten到一维再变回原来的形状
+    # cumsum: 求前缀和
+    tmp = torch.roll(torch.cumsum(b_taxonomy_size, 0), 1)
+    tmp[0] = 0
+    # 上述所有操作执行完后，tmp[i]~tmp[i+1]属于第i个batch的节点编号(0 <= i < batch, i∈N)
+
+    tt = torch.tile(tmp.unsqueeze(-1), dims=(1, root.shape[1]))
+    root_idx = root + torch.tile(tmp.unsqueeze(-1), dims=(1, root.shape[1]))
+
+    return root_idx
 
 
 # 异构图之间也是调用GAT卷积
@@ -109,6 +127,7 @@ class IF4SR(nn.Module):
 
         forest = forest.to(self.args.device)
         # root = torch.LongTensor(root).to(self.args.device)
+        root = root.to(self.args.device)
 
         forest.nodes['item'].data['h'] = self.item_embed(forest.nodes['item'].data['id'].to(self.args.device))
         forest.nodes['taxonomy'].data['h'] = self.taxonomy_embed(
@@ -128,34 +147,43 @@ class IF4SR(nn.Module):
         # 要不要将每层的根节向量记录起来后累加 待定
 
         # 反转batch操作
-        unbatch_forest = dgl.unbatch(forest)
+        # 这里不能用unbatch操作，非常耗时， 可以直接使用gnn前向传播返回的结果来计算
+        # unbatch_forest = dgl.unbatch(forest)
 
-        # 这里可以先创建一个全0的向量
-        # local_intention = None
-        local_intention = torch.zeros((len(unbatch_forest), self.first_taxonomy_num, self.args.hidden_units), device=self.args.device)
+        # 找出root中非padding的位置
+        valid_root_mask = torch.where(root != -1)
 
-        for i in range(len(unbatch_forest)):
-            indices = torch.where(torch.isin(unbatch_forest[i].nodes['taxonomy'].data['id'],
-                                             torch.LongTensor(root[i]).to(self.args.device)))
-            user_local_intention = unbatch_forest[i].nodes['taxonomy'].data['h'][indices]
+        # n个自注意力头，(N, n, args.hidden_units)
+        taxonomy_embed = rsts['taxonomy'].view(rsts['taxonomy'].shape[0], -1)
+        # 获得根节点在taxonomy_embed中的位置
+        root_idx = graph_taxonomy(forest, root, taxonomy_embed)
 
-            local_intention[i, :user_local_intention.shape[0], :] = user_local_intention
-            # if user_local_intention.shape[0] < self.first_taxonomy_num:
-            #     # 当pad有四个参数时，代表对最后两个维度扩充，左右上下
-            #     user_local_intention = F.pad(user_local_intention,
-            #                                  (0, 0, 0, self.first_taxonomy_num - user_local_intention.shape[0]),
-            #                                  value=0)
-            #
-            # if local_intention is None:
-            #     local_intention = user_local_intention.unsqueeze(dim=0)
-            # else:
-            #     local_intention = torch.concat([local_intention, user_local_intention.unsqueeze(dim=0)], dim=0)
+        # 根据根节点获得其对应的embed
+        valid_root_embed = taxonomy_embed[root_idx[valid_root_mask]]
+
+        # 局部向量
+        # 这里要用forest的batch_size，而不是整个batch大小
+        local_intention = torch.zeros((forest.batch_size, self.first_taxonomy_num, self.args.hidden_units),
+                                      device=self.args.device)
+        # 将值填入局部向量中
+        local_intention[valid_root_mask[0], valid_root_mask[1], :] = valid_root_embed
+
+        # for i in range(len(unbatch_forest)):
+        #     # indices = torch.where(torch.isin(unbatch_forest[i].nodes['taxonomy'].data['id'],
+        #     #                                  root[i].to(self.args.device)))
+        #     indices = torch.where(torch.isin(unbatch_forest[i].nodes['taxonomy'].data['id'],
+        #                                      torch.LongTensor(root[i]).to(self.args.device)))
+        #
+        #     user_local_intention = unbatch_forest[i].nodes['taxonomy'].data['h'][indices]
+        #
+        #     local_intention[i, :user_local_intention.shape[0], :] = user_local_intention
 
         return local_intention
 
     def get_global_intention(self, seq):
         # item embedding: (batch_size, L, hidden_unit) 第0层
-        V = self.item_embed(torch.LongTensor(seq).to(self.args.device))
+        # V = self.item_embed(torch.LongTensor(seq).to(self.args.device))
+        V = self.item_embed(seq.to(self.args.device))
 
         for i in range(self.args.gip_block_nums):
             # scb
@@ -196,7 +224,8 @@ class IF4SR(nn.Module):
     def get_intention(self, global_intention, local_intention):
         # 填充项不能参加softmax函数，影响了权重
         # 创建掩码，将不参加的位置设置为负无穷，负无穷在softmax中不参与计算
-        mul_res = torch.sum(global_intention.unsqueeze(dim=1) * local_intention, dim=-1)
+        # mul_res = torch.sum(global_intention.unsqueeze(dim=1) * local_intention, dim=-1)
+        mul_res = local_intention.matmul(global_intention.unsqueeze(dim=-1)).squeeze(-1)
         mask = (mul_res != 0).float()
         masked_mul_res = torch.where(mask != 0, mul_res, float('-inf'))
 
@@ -206,15 +235,19 @@ class IF4SR(nn.Module):
 
         return intention
 
-    def forward(self, user, seq, pos, neg, root, forest):
+    def forward(self, seq, pos, neg, root, forest):
 
+        # (batch_size, hidden_units)
         global_intention = self.get_global_intention(seq)
+        # (batch_size, K, hidden_units): K为根节点数量
         local_intention = self.get_local_intention(root, forest)
 
         intention = self.get_intention(global_intention, local_intention)
 
-        pos_embed = self.item_embed(torch.LongTensor(pos).to(self.args.device))
-        neg_embed = self.item_embed(torch.LongTensor(neg).to(self.args.device))
+        pos_embed = self.item_embed(pos.to(self.args.device))
+        neg_embed = self.item_embed(neg.to(self.args.device))
+        # pos_embed = self.item_embed(torch.LongTensor(pos).to(self.args.device))
+        # neg_embed = self.item_embed(torch.LongTensor(neg).to(self.args.device))
 
         # 与正负样本预测评分
         pos_logit = torch.sum(intention * pos_embed, dim=-1)
