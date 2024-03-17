@@ -2,7 +2,7 @@
 <module type="PYTHON_MODULE" version="4">
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$" />
-    <orderEntry type="jdk" jdkName="pytorch_gpu" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Remote Python 3.8.0 (sftp://zhan@10.154.44.36:22/home/zhan/.conda/envs/pytorch_qx/bin/python3)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

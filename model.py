@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import dgl.nn.pytorch as dglnn
+import numpy as np
 
 
 # 将返回结果传进来，逆向执行unbatch操作，还原节点id来代替unbatch操作
@@ -16,8 +17,6 @@ def graph_taxonomy(forest, root, taxonomy_embed):
     tmp = torch.roll(torch.cumsum(b_taxonomy_size, 0), 1)
     tmp[0] = 0
     # 上述所有操作执行完后，tmp[i]~tmp[i+1]属于第i个batch的节点编号(0 <= i < batch, i∈N)
-
-    tt = torch.tile(tmp.unsqueeze(-1), dims=(1, root.shape[1]))
     root_idx = root + torch.tile(tmp.unsqueeze(-1), dims=(1, root.shape[1]))
 
     return root_idx
@@ -25,13 +24,15 @@ def graph_taxonomy(forest, root, taxonomy_embed):
 
 # 异构图之间也是调用GAT卷积
 class GATLayer(nn.Module):
-    def __init__(self, in_feats, out_feats, num_heads):
+    def __init__(self, in_feats, out_feats, num_heads, dropout_rate):
         super(GATLayer, self).__init__()
 
         # aggregate参数指定与否都没有太大关系，因为每个dst node只有一种src node
         self.conv = dglnn.HeteroGraphConv({
-            'i2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads),
-            't2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads)
+            'i2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads, feat_drop=dropout_rate, residual=True,
+                                 activation=nn.ReLU()),
+            't2t': dglnn.GATConv(in_feats, out_feats, num_heads=num_heads, feat_drop=dropout_rate, residual=True,
+                                 activation=nn.ReLU())
         })
 
     def forward(self, g, feat):
@@ -51,6 +52,15 @@ class HGTLayer(nn.Module):
 
     def forward(self):
         pass
+
+
+class GAT_HGT_Layer(nn.Module):
+    def __init__(self):
+        pass
+
+    def forward(self):
+        pass
+
 
 
 class IF4SR(nn.Module):
@@ -93,14 +103,20 @@ class IF4SR(nn.Module):
 
         self.gnn_layer = nn.ModuleList()
 
-        for _ in range(args.gnn_layers):
+        for _ in range(args.n_hop):
             if args.gnn_conv == 'GAT':
                 new_gnn_layer = GATLayer(args.hidden_units, int(args.hidden_units / args.gnn_head_nums),
-                                         args.gnn_head_nums)
+                                         args.gnn_head_nums, args.dropout_rate)
             elif args.gnn_conv == 'HGT':
                 new_gnn_layer = HGTLayer()
+            elif args.gnn_conv == 'both':
+                new_gnn_layer = GAT_HGT_Layer()
 
             self.gnn_layer.append(new_gnn_layer)
+
+        self.local_intention_weight_norm = nn.LayerNorm(first_taxonomy_num, eps=1e-8)
+        self.intention_norm = nn.LayerNorm(args.hidden_units, eps=1e-8)
+        self.unified_map = nn.Linear(args.hidden_units, args.hidden_units, bias=False)
 
         self.args = args
         self.init_params()
@@ -133,7 +149,9 @@ class IF4SR(nn.Module):
         forest.nodes['taxonomy'].data['h'] = self.taxonomy_embed(
             forest.nodes['taxonomy'].data['id'].to(self.args.device))
 
-        for layer in range(self.args.gnn_layers):
+        # 记录每层得到的结果
+        k_list = []
+        for layer in range(self.args.n_hop):
             feat = {
                 'item': forest.nodes['item'].data['h'],
                 'taxonomy': forest.nodes['taxonomy'].data['h']
@@ -141,10 +159,10 @@ class IF4SR(nn.Module):
             # 只是返回了结果，图中的节点数据并没有被更新
             rsts = self.gnn_layer[layer].forward(forest, feat)
 
+            taxonomy_update_embed = rsts['taxonomy'].view(rsts['taxonomy'].shape[0], -1)
             # 更新图中的节点数据
-            forest.nodes['taxonomy'].data['h'] = rsts['taxonomy'].view(rsts['taxonomy'].shape[0], -1)
-
-        # 要不要将每层的根节向量记录起来后累加 待定
+            forest.nodes['taxonomy'].data['h'] = taxonomy_update_embed
+            k_list.append(taxonomy_update_embed)
 
         # 反转batch操作
         # 这里不能用unbatch操作，非常耗时， 可以直接使用gnn前向传播返回的结果来计算
@@ -154,12 +172,25 @@ class IF4SR(nn.Module):
         valid_root_mask = torch.where(root != -1)
 
         # n个自注意力头，(N, n, args.hidden_units)
-        taxonomy_embed = rsts['taxonomy'].view(rsts['taxonomy'].shape[0], -1)
+        # taxonomy_embed = rsts['taxonomy'].view(rsts['taxonomy'].shape[0], -1)
+        taxonomy_embed = k_list[0]
         # 获得根节点在taxonomy_embed中的位置
         root_idx = graph_taxonomy(forest, root, taxonomy_embed)
 
+        # 累加
+        total_k_taxonomy_embed = None
+        for k in k_list:
+            if total_k_taxonomy_embed is None:
+                total_k_taxonomy_embed = k
+            else:
+                total_k_taxonomy_embed = k + total_k_taxonomy_embed
+
+        # 求均值
+        total_k_taxonomy_embed = total_k_taxonomy_embed / len(k_list)
+
         # 根据根节点获得其对应的embed
-        valid_root_embed = taxonomy_embed[root_idx[valid_root_mask]]
+        # valid_root_embed = taxonomy_embed[root_idx[valid_root_mask]]
+        valid_root_embed = total_k_taxonomy_embed[root_idx[valid_root_mask]]
 
         # 局部向量
         # 这里要用forest的batch_size，而不是整个batch大小
@@ -167,16 +198,6 @@ class IF4SR(nn.Module):
                                       device=self.args.device)
         # 将值填入局部向量中
         local_intention[valid_root_mask[0], valid_root_mask[1], :] = valid_root_embed
-
-        # for i in range(len(unbatch_forest)):
-        #     # indices = torch.where(torch.isin(unbatch_forest[i].nodes['taxonomy'].data['id'],
-        #     #                                  root[i].to(self.args.device)))
-        #     indices = torch.where(torch.isin(unbatch_forest[i].nodes['taxonomy'].data['id'],
-        #                                      torch.LongTensor(root[i]).to(self.args.device)))
-        #
-        #     user_local_intention = unbatch_forest[i].nodes['taxonomy'].data['h'][indices]
-        #
-        #     local_intention[i, :user_local_intention.shape[0], :] = user_local_intention
 
         return local_intention
 
@@ -227,45 +248,38 @@ class IF4SR(nn.Module):
         # mul_res = torch.sum(global_intention.unsqueeze(dim=1) * local_intention, dim=-1)
         mul_res = local_intention.matmul(global_intention.unsqueeze(dim=-1)).squeeze(-1)
         mask = (mul_res != 0).float()
+        # 加一层layer norm，防止某些维度过大
+        mul_res = self.local_intention_weight_norm(mul_res)
+        # mask = (mul_res != 0).float()
         masked_mul_res = torch.where(mask != 0, mul_res, float('-inf'))
 
         local_intention_weight = F.softmax(masked_mul_res, dim=-1)
 
         intention = global_intention + torch.sum(local_intention_weight.unsqueeze(dim=-1) * local_intention, dim=1)
 
+        # 最后加层layer_norm以及dropout，方便梯度反向传播
+        intention = self.dropout(self.intention_norm(intention))
+
         return intention
 
-    def forward(self, seq, pos, neg, root, forest):
+    def forward(self, seq, root, forest, rec_items=None, training=False):
 
         # (batch_size, hidden_units)
         global_intention = self.get_global_intention(seq)
         # (batch_size, K, hidden_units): K为根节点数量
         local_intention = self.get_local_intention(root, forest)
 
-        intention = self.get_intention(global_intention, local_intention)
-
-        pos_embed = self.item_embed(pos.to(self.args.device))
-        neg_embed = self.item_embed(neg.to(self.args.device))
-        # pos_embed = self.item_embed(torch.LongTensor(pos).to(self.args.device))
-        # neg_embed = self.item_embed(torch.LongTensor(neg).to(self.args.device))
-
-        # 与正负样本预测评分
-        pos_logit = torch.sum(intention * pos_embed, dim=-1)
-        neg_logit = torch.sum(intention * neg_embed, dim=-1)
-
-        return pos_logit, neg_logit
-
-    def predict(self, seq, items, root, forest):
-        global_intention = self.get_global_intention(seq)
-        local_intention = self.get_local_intention(root, forest)
-
-        # batch_size = 1
         # (batch_size, hidden_units)
         intention = self.get_intention(global_intention, local_intention)
 
-        # (batch_size, len(items), hidden_units)
-        item_embed = self.item_embed(torch.LongTensor(items).to(self.args.device))
+        unified_intention = self.unified_map(intention)
+        # 这里不排除padding0，在crossentropy损失函数中可以指定ignore_idx
+        score = torch.matmul(unified_intention, self.item_embed.weight.transpose(1, 0))
 
-        logit = item_embed.matmul(intention.unsqueeze(-1)).squeeze(-1)
-
-        return logit
+        if training:
+            return score
+        else:
+            # (batch_size, 101, hidden_units)
+            rec_embed = self.item_embed(rec_items.to(self.args.device))
+            rc_score = torch.matmul(unified_intention.unsqueeze(1), rec_embed.transpose(2, 1)).squeeze(1)
+            return score, rec_score

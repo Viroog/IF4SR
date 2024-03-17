@@ -13,10 +13,6 @@ import torch.nn as nn
 import numpy as np
 from utils import evaluate, evaluate_valid
 
-import torch.multiprocessing
-
-torch.multiprocessing.set_sharing_strategy('file_system')
-
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default='grocery', help='dataset name')
 # 模型的超参数
