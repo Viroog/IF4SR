@@ -29,22 +29,22 @@ parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
 parser.add_argument('--l2', type=float, default=1e-4, help='l2 regularization')
 parser.add_argument('--hidden_units', type=int, default=50, help='hidden dimension')
 parser.add_argument('--dropout_rate', type=float, default=0.5, help='dropout rate')
-parser.add_argument('--device', type=str, default='cuda:0', help='cuda or cpu')
+parser.add_argument('--device', type=str, default= 'cuda:0' if torch.cuda.is_available() else 'cpu', help='cuda or cpu')
 parser.add_argument('--taxonomy_init_mode', type=str, default='glove', choices=['glove', 'default'],
                     help='how to init taxonomy embedding')
 # global intention的超参数
-parser.add_argument('--gip_block_nums', type=int, default=2, choices=[1, 2, 3],
+parser.add_argument('--block_nums', type=int, default=2, choices=[1, 2, 3],
                     help='the block num of global intention perception')
-parser.add_argument('--fcb_head_nums', type=int, default=2, choices=[1, 2, 5],
+parser.add_argument('--scb_hidden_units', type=int, default=128, help='hidden units of scb block')
+parser.add_argument('--fcb_hidden_units', type=int, default=128, help='hidden units of fcb block')
+parser.add_argument('--global_head_nums', type=int, default=2, choices=[1, 2, 5],
                     help='the head num of feature capture block')
-parser.add_argument('--scb_hidden_units', type=int, default=64, help='hidden units of scb block')
-parser.add_argument('--fcb_hidden_units', type=int, default=64, help='hidden units of fcb block')
 
 # local intention的超参数
-parser.add_argument('--gnn_conv', type=str, default='HGT', choices=['GAT', 'HGT', 'both'],
+parser.add_argument('--local_intention_conv', type=str, default='HGT', choices=['GAT', 'HGT', 'both'],
                     help='way of tree convolution')
 parser.add_argument('--n_hop', type=int, default=2, help='gnn layer must equal to the height of tree')
-parser.add_argument('--gnn_head_nums', type=int, default=2, help='the head num of attention mechanism in GAT/HGT')
+parser.add_argument('--local_head_nums', type=int, default=2, help='the head num of attention mechanism in GAT/HGT')
 
 # early stop
 parser.add_argument('--max_tolerant', type=int, default=3, help='if performance dont improve for several test, stop it')
