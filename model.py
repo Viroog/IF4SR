@@ -42,16 +42,16 @@ class GATLayer(nn.Module):
 
 
 class HGTLayer(nn.Module):
-    def __init__(self, in_feats, out_feats):
+    def __init__(self, in_feats, head_size, num_heads, num_ntypes=2, num_etypes=2, dropout_rate=0.2):
         super(HGTLayer, self).__init__()
 
-        self.conv = dglnn.HeteroGraphConv({
-            'i2t': dglnn.HGTConv(),
-            't2t': dglnn.HGTConv()
-        })
+        self.conv = dglnn.HGTConv(in_size=in_feats, head_size=head_size, num_heads=num_heads, num_ntypes=num_ntypes,
+                                  num_etypes=num_etypes, dropout=dropout_rate)
 
-    def forward(self):
-        pass
+    def forward(self, g, feat):
+        rsts = self.conv(g, feat)
+
+        return rsts
 
 
 class GAT_HGT_Layer(nn.Module):
@@ -61,6 +61,25 @@ class GAT_HGT_Layer(nn.Module):
     def forward(self):
         pass
 
+
+class Mixer_MLP(nn.Module):
+    def __init__(self):
+        super(Mixer_MLP, self).__init__()
+
+    def FCB(self, x):
+        pass
+
+    def SCB(self, x):
+        pass
+
+    def forward(self, x):
+        # sequential capture block
+        x = x + self.SCB(x)
+
+        # feature capture block
+        x = x + self.FCB(x)
+
+        return x
 
 
 class IF4SR(nn.Module):
@@ -108,7 +127,9 @@ class IF4SR(nn.Module):
                 new_gnn_layer = GATLayer(args.hidden_units, int(args.hidden_units / args.gnn_head_nums),
                                          args.gnn_head_nums, args.dropout_rate)
             elif args.gnn_conv == 'HGT':
-                new_gnn_layer = HGTLayer()
+                new_gnn_layer = HGTLayer(in_feats=args.hidden_units,
+                                         head_size=int(args.hidden_units / args.gnn_head_nums),
+                                         num_heads=args.gnn_head_nums, dropout_rate=args.dropout_rate)
             elif args.gnn_conv == 'both':
                 new_gnn_layer = GAT_HGT_Layer()
 
@@ -172,7 +193,6 @@ class IF4SR(nn.Module):
         valid_root_mask = torch.where(root != -1)
 
         # n个自注意力头，(N, n, args.hidden_units)
-        # taxonomy_embed = rsts['taxonomy'].view(rsts['taxonomy'].shape[0], -1)
         taxonomy_embed = k_list[0]
         # 获得根节点在taxonomy_embed中的位置
         root_idx = graph_taxonomy(forest, root, taxonomy_embed)
@@ -281,5 +301,5 @@ class IF4SR(nn.Module):
         else:
             # (batch_size, 101, hidden_units)
             rec_embed = self.item_embed(rec_items.to(self.args.device))
-            rc_score = torch.matmul(unified_intention.unsqueeze(1), rec_embed.transpose(2, 1)).squeeze(1)
+            rec_score = torch.matmul(unified_intention.unsqueeze(1), rec_embed.transpose(2, 1)).squeeze(1)
             return score, rec_score

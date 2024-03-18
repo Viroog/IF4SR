@@ -10,6 +10,7 @@ from torch.utils.data import Dataset
 
 def load_data(data_path):
     data_dir = []
+    # user
     dir_list = os.listdir(data_path)
     dir_list.sort()
 
@@ -37,6 +38,24 @@ class myFloder(Dataset):
         return self.size
 
 
+class myFloder_valid_test(Dataset):
+    def __init__(self, root_dir, loader, user_dict, item_set):
+        self.root = root_dir
+        self.loader = loader
+        self.dir_list = load_data(root_dir)
+        self.user_dict = user_dict
+        self.item_set = item_set
+        self.size = len(self.dir_list)
+
+    def __getitem__(self, index):
+        dir_ = self.dir_list[index]
+        data = self.loader(dir_)
+        return data, self.user_dict, self.item_set
+
+    def __len__(self):
+        return self.size
+
+
 def collate(data):
     forest, user, seq, target, root = [], [], [], [], []
 
@@ -57,16 +76,23 @@ def collate(data):
         np.array(root))
 
 
-def collate_valid_test(data, user_dict, item_set):
+def collate_valid_test(data):
     forest, user, seq, target, root, neg_items = [], [], [], [], [], []
 
+    # for d in data:
+    #     forest.append(d[0][0])
+    #     user.append(d[1]['user'])
+    #     seq.append(d[1]['seq'].detach().numpy())
+    #     target.append(d[1]['target'])
+    #     neg_items.append(generate_evaluate_neg(user[-1].item(), user_dict, item_set))
+    #     root.append(d[1]['root'].detach().numpy())
     for d in data:
-        forest.append(d[0][0])
-        user.append(d[1]['user'])
-        seq.append(d[1]['seq'].detach().numpy())
-        target.append(d[1]['target'])
-        neg_items.append(generate_evaluate_neg(user[-1].item(), user_dict, item_set))
-        root.append(d[1]['root'].detach().numpy())
+        forest.append(d[0][0][0])
+        user.append(d[0][1]['user'])
+        seq.append(d[0][1]['seq'].detach().numpy())
+        target.append(d[0][1]['target'])
+        neg_items.append(generate_evaluate_neg(user[-1].item(), d[1], d[2]))
+        root.append(d[0][1]['root'].detach().numpy())
 
     return dgl.batch(forest), torch.LongTensor(user), torch.LongTensor(np.array(seq)), torch.LongTensor(
         target), torch.LongTensor(np.array(root)), torch.LongTensor(np.array(neg_items))

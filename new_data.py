@@ -130,7 +130,7 @@ def generate_data(job=10):
 if __name__ == '__main__':
     parse = argparse.ArgumentParser()
     parse.add_argument('--dataset', type=str, default='grocery')
-    parse.add_argument('--job', type=int, default=10, help='parallel job num')
+    parse.add_argument('--job', type=int, default=20, help='parallel job num')
     parse.add_argument('--n_hop', type=int, default=2, help='category layer num')
     parse.add_argument('--L', type=int, default=50, help='max length of user interact sequence')
 

@@ -1,19 +1,23 @@
 import argparse
 import json
+import multiprocessing
 import os
 import pickle
 import time
-import h5py
+import os
 import torch
 
 from model import IF4SR
-from utils import myFloder, collate, collate_valid_test, generate_user_dict
+from utils import myFloder, collate, collate_valid_test, generate_user_dict, myFloder_valid_test
 from evaluate import get_ndcg_hit
 from torch.utils.data import DataLoader
 import torch.optim as optim
 import torch.nn as nn
 from dgl import load_graphs
 import pandas as pd
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default='grocery', help='dataset name')
@@ -37,7 +41,7 @@ parser.add_argument('--scb_hidden_units', type=int, default=64, help='hidden uni
 parser.add_argument('--fcb_hidden_units', type=int, default=64, help='hidden units of fcb block')
 
 # local intention的超参数
-parser.add_argument('--gnn_conv', type=str, default='GAT', choices=['GAT', 'HGT', 'both'],
+parser.add_argument('--gnn_conv', type=str, default='HGT', choices=['GAT', 'HGT', 'both'],
                     help='way of tree convolution')
 parser.add_argument('--n_hop', type=int, default=2, help='gnn layer must equal to the height of tree')
 parser.add_argument('--gnn_head_nums', type=int, default=2, help='the head num of attention mechanism in GAT/HGT')
@@ -91,22 +95,30 @@ if __name__ == '__main__':
     valid_root = f'./new_dataset/{args.dataset}_{args.L}_{args.n_hop}/valid/'
     test_root = f'./new_dataset/{args.dataset}_{args.L}_{args.n_hop}/test/'
 
-    train_set = myFloder(train_root, load_graphs)
-    valid_set = myFloder(valid_root, load_graphs)
-    test_set = myFloder(test_root, load_graphs)
-
     # 所有item的物品集合
     item_set = set(range(1, item_num + 1))
 
+    train_set = myFloder(train_root, load_graphs)
+    # valid_set = myFloder(valid_root, load_graphs)
+    # test_set = myFloder(test_root, load_graphs)
+    valid_set = myFloder_valid_test(valid_root, load_graphs, user_dict, item_set)
+    test_set = myFloder_valid_test(test_root, load_graphs, user_dict, item_set)
+
     train_dataloader = DataLoader(dataset=train_set, batch_size=args.batch_size,
                                   collate_fn=collate, shuffle=True,
-                                  pin_memory=True, num_workers=8, persistent_workers=True, drop_last=True)
+                                  pin_memory=True, num_workers=8, drop_last=True)
+    # val_dataloader = DataLoader(dataset=valid_set, batch_size=args.batch_size,
+    #                             collate_fn=lambda x: collate_valid_test(x, user_dict, item_set),
+    #                             pin_memory=True, num_workers=4)
+    # test_dataloader = DataLoader(dataset=test_set, batch_size=args.batch_size,
+    #                              collate_fn=lambda x: collate_valid_test(x, user_dict, item_set),
+    #                              pin_memory=True, num_workers=4)
     val_dataloader = DataLoader(dataset=valid_set, batch_size=args.batch_size,
-                                collate_fn=lambda x: collate_valid_test(x, user_dict, item_set),
-                                pin_memory=True, persistent_workers=True, num_workers=4)
+                                collate_fn=collate_valid_test,
+                                pin_memory=True, num_workers=4)
     test_dataloader = DataLoader(dataset=test_set, batch_size=args.batch_size,
-                                 collate_fn=lambda x: collate_valid_test(x, user_dict, item_set),
-                                 pin_memory=True, persistent_workers=True, num_workers=4)
+                                 collate_fn=collate_valid_test,
+                                 pin_memory=True, num_workers=4)
 
     model = IF4SR(args, item_num, taxonomy_num, len(taxonomy_cnt[1])).to(args.device)
 
